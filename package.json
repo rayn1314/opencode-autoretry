@@ -1,0 +1,20 @@
+{
+  "name": "opencode-autoretry",
+  "version": "1.0.0",
+  "description": "OpenCode 插件：自动重试中断的 AI 对话",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "install-plugin": "node scripts/install.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["opencode", "plugin", "autoretry", "ai"],
+  "author": "rayn1314",
+  "license": "MIT",
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
