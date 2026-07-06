@@ -1,21 +1,49 @@
 # opencode-autoretry
 
-OpenCode 插件：自动重试中断的 AI 对话。
+OpenCode 插件：智能检测静默中断并自动重试。
 
-当 OpenCode 会话因网络抖动、供应商超时或静默中断失败时，自动检测并重试发送上一条用户消息，让工作持续推进而不被打断。
+当 OpenCode 会话因网络抖动、中转网关超时（60s nginx 超时）或静默中断失败时，插件能识别不同类型的错误类型并重试，让工作持续推进不被打断。
 
-## 功能
+## 功能特性
 
-- **自动检测中断**：监听 `session.error` 事件，识别静默中断、网络错误、超时等
-- **智能重试**：只在可恢复错误上重试，避免无效重试烧 token
-- **退避策略**：3s → 6s → 12s 指数退避，给供应商网络喘息时间
-- **重试上限**：默认最多 3 次，防止死循环
-- **可视化反馈**：toast 提示当前重试状态
-- **可配置**：在 `opencode.json` 中调整所有参数
+### 自动检测三大类中断
+
+- **连接断开**：`ECONNRESET`、`Server disconnected`、网络抖动
+- **静默中断**：0 输出、`finish=unknown`，OpenCode 自己都检测不到的本质错误
+- **超时断开**：`Connection failed: Server disconnected without sending a response.`
+
+### 空白完成保护
+
+- 识别中转网关 60s 超时的伪造 `finish=length` + 0 output + 空 parts
+- 避免下游组件（如大纲页时间轴）误判为"正常截断"
+- 只对真正空白（无文本无工具调用）触发续写
+
+### 子代理等待防护
+
+- Sisyphus/ultraworker 等编排型 agent 发 task() 后等子代理返回时，session 自然 idle
+- 插件不发送"继续"/"继续！！！"，避免打断编排逻辑
+
+### 可靠的重试机制
+
+- 最大重试 2 次（避免死循环）
+- 退避：5s → 10s（避免和网关 HTTP keepalive 冲突）
+- 轮询兜底：60 秒无事件才轮询（极端情况）
+
+### 三大防奔溃机制
+
+1. `session.error` 触发时直接用事件 error 对象，不依赖 DB 时序
+2. `session.idle` 不杀 pending retryTimer（之前会杀）
+3. `chat.message`/`session.status` 看到标记不重置空白计数（避免无限循环）
+
+### 清洁的单一真相源
+
+- 核心逻辑统一在 `src/index.ts`
+- `npm run build && npm run install-plugin` 部署
+- 与本地 `autoretry.js` 分离，永远保持同步
 
 ## 安装
 
-### 方式一：从源码安装
+### 从源码安装
 
 ```bash
 git clone https://github.com/rayn1314/opencode-autoretry.git
@@ -25,62 +53,106 @@ npm run build
 npm run install-plugin
 ```
 
-### 方式二：下载预编译版本
+安装脚本会将 `dist/index.js` 拷到 `~/.config/opencode/plugins/autoretry.js`。
 
-（待发布到 npm 后补充）
+### 预编译版本
+
+（待发布）
 
 ## 配置
 
-在 `opencode.json` 中添加 `autoretry` 块：
+插件目前使用硬编码默认配置（单一真相源），未来可扩展为 `opencode.json` 可选配置：
 
 ```json
 {
+  // 未来可能添加的配置
   "autoretry": {
     "enabled": true,
-    "maxRetries": 3,
-    "backoffMs": [3000, 6000, 12000],
-    "retryOn": ["silent", "network"]
+    "maxRetries": 2,
+    "backoffMs": [5000, 10000],
+    "pollIntervalMs": 60000,
+    "retryOn": ["输出截断", "静默中断", "数据流截断", "连接断开", "请求超时"]
   }
 }
 ```
 
-### 配置项说明
+暂不可配的原因：
+- 检测逻辑依赖 FFT（可视化反馈）
+- 子代理等待防护当前对所有 agent 一致
+- 空白检测已收敛为唯一出口，无需额外配置
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `enabled` | boolean | `true` | 是否启用自动重试 |
-| `maxRetries` | number | `3` | 最大重试次数 |
-| `backoffMs` | number[] | `[3000, 6000, 12000]` | 退避时间（毫秒），按重试次数递增 |
-| `retryOn` | string[] | `["silent", "network"]` | 触发重试的错误类型 |
+## 错误分类
 
-### 错误类型说明
-
-| 类型 | 含义 | 是否默认重试 |
-|------|------|--------------|
-| `silent` | 静默中断（0 输出、finish=unknown） | ✅ |
-| `network` | 网络错误（ECONNRESET、fetch failed） | ✅ |
-| `timeout` | 超时错误 | ❌ |
-| `other` | 其他错误（如 API key 错误） | ❌ |
+| 分类 | 触发条件 | 奔溃行为 |
+|------|----------|----------|
+| **用户中止** | `MessageAbortedError` | 跳过，不打扰 |
+| **输出截断** | output>0 | 重试发送"继续" |
+| **静默中断** | 0 output + 无 error + finish=unknown | 重试发送上一条消息 |
+| **数据流截断** | JSON parsing / Unterminated | 重试发送"继续" |
+| **连接断开** | `Connection failed` / `Server disconnected` / `ECONNRESET` | 重试发送上一条消息 |
+| **请求超时** | `timeout` / `timed out` | 重试发送上一条消息 |
+| **限流** | `429` / `rate limit` | toast 提醒，不重试 |
+| **服务商异常** | `5xx` / `provider` | toast 提醒，不重试 |
 
 ## 工作原理
 
+### session.error 路径（第一防线）
+
 ```
-用户发消息 → AI 响应中 → 触发 session.error
-                              ↓
-                    插件收到错误事件
-                              ↓
-                    分类错误类型
-                              ↓
-           可重试类型          不可重试类型
-                ↓                    ↓
-        检查重试次数 < 上限      toast 提醒用户
-                ↓
-        等待退避时间（3s/6s/12s）
-                ↓
-        session.prompt() 重发上一条用户消息
-                ↓
-        计数 +1，继续监听
+session.error 事件 ← OpenCode 服务端
+    ↓
+直接提取 error.name + error.message（事件自带）
+    ↓
+分类错误类型
+    ↓
+可重试？ → 否 → toast 提醒
+    ↓
+是 → 检查 retryCount < maxRetries
+    ↓
+是 → scheduleRetry(5s/10s)
 ```
+
+**特点**：错误消息还没入库也能分类，不依赖 DB 时序。
+
+### session.idle 路径（第二防线）
+
+```
+用户发消息 → session idle
+    ↓
+checkAndRetry 查消息列表
+    ↓
+finish=stop/length + output=0 → 空白完成检测
+    ↓
+finish=unknown → 分类错误，scheduleRetry
+    ↓
+若 retryTimer 存在 → 只清 pollTimer，保留 retryTimer
+    ↓
+否则 → 清空所有状态和定时器
+```
+
+**特点**：`session.idle` 看到 pending retryTimer 时不杀掉它（之前会杀）。
+
+### 轮询路径（极端兜底）
+
+```
+60s 内无任何事件 → poll check 触发
+    ↓
+检查 lastActivity 是否 ≥ 60s
+    ↓
+是 → checkAndRetry（同 session.idle 路径）
+    ↓
+清空 pollTimer
+```
+
+### chat.message 防循环机制
+
+```
+用户发消息 → autoSendPending? 
+    ├─ 是（autoretry 发的）→ 只更新时间戳，不重置 blankCount/retryCount
+    └─ 否（真正用户）→ 重置 blankCount=0, retryCount=0
+```
+
+**特点**：`chat.message` 不应看到自己的续写消息，否则 blankCount 永远到不了 maxRetries。
 
 ## 与 watchdog 的关系
 
@@ -97,9 +169,24 @@ npm run install-plugin
 
 ```
 service: autoretry
-level: info/warn/error
-message: 插件已初始化 / 检测到会话错误 / 已重试第 N 次
+level: info
+message: autoretry plugin loaded (idle-check)
+message: detected interrupt: 连接断开
+message: retry sent (1)
+message: subagent wait detected, skipping all retry/continuation
 ```
+
+### 什么时候触发分类
+
+- `session.error`：最后一条 assistant 消息有 error
+- `session.idle`：最后一条 assistant 消息无 error + finish=undefined
+- `poll check`：最后一条 assistant 消息无 error + finish=undefined + 超过 60s
+
+### 什么时候跳过
+
+- `session.idle` 检测到 `finish=stop`/`finish=length` → 不走分类
+- 子代理等待（前条消息有 tool calls + 当前无 error + output=0） → 不发续写
+- finish=stop 且有文本/工具 → 不触发空白完成续写
 
 ## 开发
 
@@ -115,12 +202,16 @@ npm run typecheck
 
 # 部署到全局插件目录
 npm run install-plugin
+
+# 手动触发 session idle（调试）
+# 在 OpenCode 控制台执行：
+# client.session.trigger({ type: "idle", properties: { sessionID } })
 ```
 
 ## 已知限制
 
 1. **依赖 OpenCode 事件结构**：`session.error` 的 payload 结构未在文档中明确，当前做防御性处理
-2. **配置读取**：`opencode.json` 中的 `autoretry` 配置读取依赖 OpenCode SDK 行为
+2. **配置读取**：当前配置硬编码在 `src/index.ts`，未来可扩展为全局配置
 3. **重试内容**：当前只重发用户消息的 `parts`，不处理 attachments
 
 ## License
