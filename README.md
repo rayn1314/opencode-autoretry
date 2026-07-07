@@ -202,10 +202,76 @@ npm run typecheck
 
 # 部署到全局插件目录
 npm run install-plugin
+```
 
-# 手动触发 session idle（调试）
-# 在 OpenCode 控制台执行：
-# client.session.trigger({ type: "idle", properties: { sessionID } })
+## 诊断脚本
+
+仓库提供 4 个只读诊断脚本，直接查询 OpenCode 的 SQLite 数据库，帮助定位异常消息和验证 autoretry 行为。
+
+### diagnose — 综合诊断
+
+扫描数据库中的异常消息模式，快速掌握整体状况。
+
+```bash
+npm run diagnose          # 扫描最近 7 天
+npm run diagnose -- 30    # 扫描最近 30 天
+npm run diagnose -- 0     # 扫描全部记录
+```
+
+检测项：
+1. 空白完成（finish=stop/length + output=0）
+2. 中转网关伪造 length（finish=length + output=0 + input>0）
+3. 连接断开（Connection failed / disconnected / ECONNRESET）
+4. 静默中断（finish=undefined + output=0 + 无 error）
+5. 零 token 消息（input=0 + output=0）
+6. autoretry 触发记录（"继续"/"继续！！！"消息）
+
+### timeline — Session 消息时间线
+
+查看特定 session 的完整消息流，包括角色、finish、token、错误、工具调用。
+
+```bash
+npm run timeline -- <session-id>
+# 示例：
+npm run timeline -- ses_0c82b5cf5ffeDHr2ayODq7mlX8
+```
+
+输出包含每条消息的 finish 状态、token 用量、error 详情、工具调用摘要。如果发现错误消息，会自动检查错误后是否有 autoretry 介入。
+
+### errors — 错误消息查找
+
+按关键词搜索消息，查看完整 JSON 结构和上下文。
+
+```bash
+npm run errors -- "Connection failed"
+npm run errors -- "disconnected"
+npm run errors -- "UnknownError"
+npm run errors                          # 不带参数：列出最近 10 条有 error 的消息
+```
+
+每条匹配消息会显示：role、finish、tokens、error 完整结构、provider/model，以及前一条 assistant 消息的状态（用于判断 isSubagentWait 是否应该拦截）。
+
+### trace — autoretry 触发追踪
+
+查找 autoretry 发送的"继续"/"继续！！！"消息，显示每次触发的上下文和结果。
+
+```bash
+npm run trace             # 最近所有触发
+npm run trace -- 7        # 最近 7 天
+npm run trace -- <session-id>  # 特定 session
+```
+
+每次触发显示：
+- 触发原因（前一条 assistant 的 finish、output、error、hasTool）
+- 触发类型（空白完成续写 / 中断重试 / 输出截断续写）
+- 重试结果（✓ 成功 / ✗ 失败 / ? 仍空白）
+
+### 数据库路径
+
+脚本自动定位 `~/.local/share/opencode/opencode.db`。可通过环境变量覆盖：
+
+```bash
+OPENCODE_DB=/path/to/opencode.db npm run diagnose
 ```
 
 ## 已知限制

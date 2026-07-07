@@ -7,7 +7,11 @@
   "scripts": {
     "build": "tsc",
     "install-plugin": "node scripts/install.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "diagnose": "node scripts/diagnose.js",
+    "timeline": "node scripts/session-timeline.js",
+    "errors": "node scripts/error-lookup.js",
+    "trace": "node scripts/retry-trace.js"
   },
   "keywords": ["opencode", "plugin", "autoretry", "ai"],
   "author": "rayn1314",
